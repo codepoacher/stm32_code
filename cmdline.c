@@ -6,6 +6,14 @@
 
 #define TIP "\r\n#"
 
+#define PARAM_VALID_NUM(n)\
+do {\
+    if(*(uint8_t *)arg != n) {\
+        printf("\r\nparam num is false,need %d, but %d\r\n", n, *(uint8_t *)arg);\
+        return;\
+    }\
+} while(0)
+
 struct commond_ctrl{
     char *cmd_string;
     void (*cmd)(void *arg, void *args[]);
@@ -26,8 +34,26 @@ struct commond_ctrl g_cmd_list[] = {
     {"reboot",reboot,    "reboot the bord"},
 };
 
+//将16进制字符串格式化为16进制数
+static uint32_t str2hex(uint8_t *data)
+{
+    int num = 0;
+
+    //判断是否为16进制字符串
+    if(*data != '0' || (*(data+1) != 'x' && *(data+1) != 'X')) {
+        printf("\r\nyou have input string \"%s\", please input right hex number!\r\n",data);
+        return 0;
+    }
+
+    sscanf((const char*)data, "%x", &num);
+    return num;
+}
+
+/******************************commond start***********************************/
 static void cmd_help(void *arg, void *args[])
 {
+    PARAM_VALID_NUM(0);
+
     printf("\r\nCMD             DESCRIPTION\r\n");
     for(uint8_t i = 0 ;i < sizeof(g_cmd_list)/sizeof(struct commond_ctrl); i++) {
         if(g_cmd_list[i].cmd_string != NULL && g_cmd_list[i].cmd != NULL){
@@ -38,44 +64,57 @@ static void cmd_help(void *arg, void *args[])
     }
 }
 
+static void reboot(void *arg, void *args[])
+{
+    PARAM_VALID_NUM(0);
+
+    __set_FAULTMASK(1);//关闭总中断
+    NVIC_SystemReset();//请求单片机重启,不允许被打断，所以关总中断
+}
+
+static void cmd_free(void *arg, void *args[])
+{
+    PARAM_VALID_NUM(0);
+
+    printf("\r\nheap:%d,minheap:%d,cmdstack:%d\r\n", xPortGetFreeHeapSize(),
+           xPortGetMinimumEverFreeHeapSize(), (int)uxTaskGetStackHighWaterMark(NULL));
+}
+
 static void moto_ctrl(void *arg, void *args[])
 {
-    if(*(uint8_t *)arg != 3) {
-        printf("\r\nparam num is false,need 3, but %d\r\n",*(uint8_t *)arg);
-        return;
-    }
+    PARAM_VALID_NUM(3);
 
     MOTOR_HANDLE moto = atoi((const char *)args[0]);
     uint16_t in1 = atoi((const char *)args[1]);
     uint16_t in2 = atoi((const char *)args[2]);
     //motorX_control(moto,in1,in2);
 }
+
 static void led_ctrl(void *arg, void *args[])
 {
+    PARAM_VALID_NUM(1);
+
     uint8_t onoff = atoi((const char *)args[0]);
     HAL_GPIO_WritePin(GPIOE, GPIO_PIN_5, onoff);
 }
-
-static void cmd_free(void *arg, void *args[])
-{
-    printf("\r\nheap:%d,minheap:%d,cmdstack:%d\r\n", xPortGetFreeHeapSize(),
-           xPortGetMinimumEverFreeHeapSize(), (int)uxTaskGetStackHighWaterMark(NULL));
-}
-
-static void reboot(void *arg, void *args[])
-{
-    __set_FAULTMASK(1);//关闭总中断
-    NVIC_SystemReset();//请求单片机重启,不允许被打断，所以关总中断
-}
+/***************************commond end*****************************************/
 
 static uint8_t cmd_str_analyse(uint8_t *data, uint8_t **cmd, uint8_t **param)
 {
     uint8_t *str = NULL;
     uint8_t i = 0;
 
-    *cmd = data;
+    //找到第一个不为空格的字符
     str = data;
+    for( ; ; ) {
+        if(*str != ' ') {
+            *cmd = str;
+            break;
+        }
+        str++;
+    }
 
+    //解析命令后面的参数，保存在指针*param下
     for( ; ; ) {
         if (*str != '\0') {
             if(*str == ' ') {
@@ -100,12 +139,13 @@ static void cmdline_dispatcher(uint8_t *data)
     uint8_t *param[20] = {NULL};
     uint8_t *cmd = NULL;
     uint8_t param_num = 0;
+    uint8_t i = 0;
 
     /* data格式：命令[空格]param0[空格]param[1][空格]param[2].....*/
     /* 例：moto 1 99 10 */
     param_num = cmd_str_analyse(data, &cmd, param);
 
-    for(uint8_t i = 0 ;i < sizeof(g_cmd_list)/sizeof(struct commond_ctrl); i++) {
+    for(i = 0 ;i < sizeof(g_cmd_list)/sizeof(struct commond_ctrl); i++) {
         if(g_cmd_list[i].cmd_string != NULL && g_cmd_list[i].cmd != NULL){
             if(strcmp((const char *)cmd, g_cmd_list[i].cmd_string) == 0) {
                 g_cmd_list[i].cmd(&param_num, (void **)param);
@@ -114,8 +154,9 @@ static void cmdline_dispatcher(uint8_t *data)
         }
     }
 
-    printf("\r\nnot found cmd \"%s\",please try again or input \"help\"\r\n", cmd);
-
+    if (i >= sizeof(g_cmd_list)/sizeof(struct commond_ctrl) && *cmd != '\0') {
+        printf("\r\nnot found commond \"%s\", please try again or input \"help\"!\r\n",cmd);
+    }
 }
 
 static int32_t cmdline_rx(void *data, int32_t len)
