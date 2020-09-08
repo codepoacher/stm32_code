@@ -1,8 +1,10 @@
-
-#include "uart.h"
+#include <time.h>
+#include "cmd_uart.h"
 #include "stdlib.h"
 #include "FreeRTOS.h"
 #include "motor.h"
+
+#ifdef USED_CMDLINE
 
 #define TIP "\r\n#"
 
@@ -14,24 +16,42 @@ do {\
     }\
 } while(0)
 
-struct commond_ctrl{
-    char *cmd_string;
-    void (*cmd)(void *arg, void *args[]);
-    char *description;
+struct cmd_line_uart {
+    void (*write)(uint8_t *data, uint16_t size);
+    uint16_t(*read)(uint8_t *data);
 };
+
+typedef struct {
+    struct cmdline_list cmdline;
+    list_head_t list;
+}ST_CMDLINE_NODE;
 
 static void cmd_help(void *arg, void *args[]);
 static void moto_ctrl(void *arg, void *args[]);
-static void led_ctrl(void *arg, void *args[]);
 static void cmd_free(void *arg, void *args[]);
 static void reboot(void *arg, void *args[]);
+static void baseinfo(void *arg, void *args[]);
+static void cmd_adc(void *arg, void *args[]);
+static void cmd_temp(void *arg, void *args[]);
+static void cmd_sense(void *arg, void *args[]);
+static void cmd_dev(void *arg, void *args[]);
+static void cmd_mlx(void *arg, void *args[]);
 
-struct commond_ctrl g_cmd_list[] = {
+
+static list_head_t s_cmd_list;
+struct cmd_line_uart g_cmd_uart;
+
+static struct cmdline_list g_cmd_list[] = {
     {"help",  cmd_help,  "list all commond!"},
-    {"moto",  moto_ctrl, "moto control! example:moto X in1 in2"},
-    {"led" ,  led_ctrl,  "example:led 1"},
+    {"moto",  moto_ctrl, "moto control! example:moto X direction speed"},
     {"free",  cmd_free,  "list heap, min ever heap, cdmline_thread stack"},
     {"reboot",reboot,    "reboot the bord"},
+    {"info",  baseinfo,  "get base infomation"},
+    {"adc",   cmd_adc,   "get adc value"},
+    {"sense", cmd_sense, "get switch state"},
+    {"temp",  cmd_temp,  "get resistor temperature"},
+    {"dev",   cmd_dev,   "control device state"},
+    {"mlx",   cmd_mlx,   "mlx90614 test"},
 };
 
 //将16进制字符串格式化为16进制数
@@ -54,12 +74,25 @@ static void cmd_help(void *arg, void *args[])
 {
     PARAM_VALID_NUM(0);
 
-    printf("\r\nCMD             DESCRIPTION\r\n");
-    for(uint8_t i = 0 ;i < sizeof(g_cmd_list)/sizeof(struct commond_ctrl); i++) {
-        if(g_cmd_list[i].cmd_string != NULL && g_cmd_list[i].cmd != NULL){
+    printf("\r\nCMD                 DESCRIPTION\r\n");
+    // for (uint8_t i = 0;i < sizeof(g_cmd_list) / sizeof(struct cmdline_list); i++) {
+    //     if (g_cmd_list[i].cmd_string != NULL && g_cmd_list[i].cmd != NULL) {
+    //         //第二列打印对齐
+    //         printf("%-*s", 20 - strlen(g_cmd_list[i].cmd_string), g_cmd_list[i].cmd_string);
+    //         printf("\"%s\"\r\n", g_cmd_list[i].description);
+    //     }
+    // }
+
+    ST_CMDLINE_NODE *node;
+    list_head_t *pos;
+    list_for_each(pos, &s_cmd_list)
+    {
+        node = list_entry(pos, ST_CMDLINE_NODE, list);
+        if (node->cmdline.cmd_string != NULL && node->cmdline.cmd != NULL) {
             //第二列打印对齐
-            printf("%-*s",20-strlen(g_cmd_list[i].cmd_string), g_cmd_list[i].cmd_string);
-            printf("\"%s\"\r\n", g_cmd_list[i].description);
+           //printf("%-*s", 20 - strlen(node->cmdline.cmd_string), node->cmdline.cmd_string);
+            printf("%-*s", 20, node->cmdline.cmd_string);
+            printf("\"%s\"\r\n", node->cmdline.description);
         }
     }
 }
@@ -78,6 +111,20 @@ static void cmd_free(void *arg, void *args[])
 
     printf("\r\nheap:%d,minheap:%d,cmdstack:%d\r\n", xPortGetFreeHeapSize(),
            xPortGetMinimumEverFreeHeapSize(), (int)uxTaskGetStackHighWaterMark(NULL));
+}
+
+static void baseinfo(void *arg, void *args[])
+{
+    PARAM_VALID_NUM(0);
+
+    uint32_t now = get_process_msec();
+    time_t rawtime = now / 1000;
+    struct tm *info = localtime(&rawtime);
+
+    printf("\r\nbuild time:%s %s\r\n", __DATE__, __TIME__);
+    printf("gcc version:%s\r\n", __VERSION__);
+    printf("run time:%ums, %02d-%02d:%02d:%02d\r\n", (unsigned int)now, \
+        info->tm_mday, info->tm_hour, info->tm_min, info->tm_sec);
 }
 
 static void moto_ctrl(void *arg, void *args[])
@@ -145,17 +192,36 @@ static void cmdline_dispatcher(uint8_t *data)
     /* 例：moto 1 99 10 */
     param_num = cmd_str_analyse(data, &cmd, param);
 
-    for(i = 0 ;i < sizeof(g_cmd_list)/sizeof(struct commond_ctrl); i++) {
-        if(g_cmd_list[i].cmd_string != NULL && g_cmd_list[i].cmd != NULL){
-            if(strcmp((const char *)cmd, g_cmd_list[i].cmd_string) == 0) {
-                g_cmd_list[i].cmd(&param_num, (void **)param);
+    // for (i = 0;i < sizeof(g_cmd_list) / sizeof(struct cmdline_list); i++) {
+    //     if (g_cmd_list[i].cmd_string != NULL && g_cmd_list[i].cmd != NULL) {
+    //         if (strcmp((const char *)cmd, g_cmd_list[i].cmd_string) == 0) {
+    //             g_cmd_list[i].cmd(&param_num, (void **)param);
+    //             return;
+    //         }
+    //     }
+    // }
+
+    // if (i >= sizeof(g_cmd_list) / sizeof(struct cmdline_list) && *cmd != '\0') {
+    //     printf("\r\nnot found commond \"%s\", please try again or input \"help\"!\r\n", cmd);
+    // }
+
+
+    ST_CMDLINE_NODE *node;
+    list_head_t *pos;
+    list_for_each(pos, &s_cmd_list)
+    {
+        node = list_entry(pos, ST_CMDLINE_NODE, list);
+        if (node->cmdline.cmd_string != NULL && node->cmdline.cmd != NULL) {
+            if (strcmp((const char *)cmd, node->cmdline.cmd_string) == 0) {
+                LogDebug("\r\n");
+                node->cmdline.cmd(&param_num, (void **)param);
                 return;
             }
         }
     }
 
-    if (i >= sizeof(g_cmd_list)/sizeof(struct commond_ctrl) && *cmd != '\0') {
-        printf("\r\nnot found commond \"%s\", please try again or input \"help\"!\r\n",cmd);
+    if (*cmd != '\0') {
+        LogDebug("\r\nnot found commond \"%s\", please try again or input \"help\"!\r\n", cmd);
     }
 }
 
@@ -168,7 +234,7 @@ static int32_t cmdline_rx(void *data, int32_t len)
 
     for (; i < len; i++) {
         if (tmp[i] != '\r') {
-            uart1.write(&tmp[i], 1);
+            g_cmd_uart.write(&tmp[i], 1);
             /* 退格处理 */
             if (0x7f == tmp[i]) {
                 cmd_buf[--buf_cnt] = 0;
@@ -187,7 +253,7 @@ static int32_t cmdline_rx(void *data, int32_t len)
             cmdline_dispatcher(cmd_buf);
             memset(cmd_buf, 0, buf_cnt);
             buf_cnt = 0;
-            uart1.write((uint8_t *)TIP, strlen(TIP));
+            g_cmd_uart.write((uint8_t *)TIP, strlen(TIP));
         }
     }
 
@@ -196,34 +262,66 @@ static int32_t cmdline_rx(void *data, int32_t len)
 
 static THREAD_VOID cmdline_process(void *args)
 {
-    uint8_t buffer[UART1_LOOP_BUFFER_SIZE] = {0};
+    uint8_t buffer[UART1_LOOP_BUFFER_SIZE] = { 0 };
     uint8_t len = 0;
 
-    while(1) {
-        len = uart1.read(buffer);
-        if(len > 0) {
+    while (1) {
+        len = g_cmd_uart.read(buffer);
+        if (len > 0) {
             //printf("recv len(%d) and data is:%s\r\n", len, buffer);
             cmdline_rx(buffer, len);
         }
-        sleep_ms(10);
+        sleep_ms(100);
     }
 }
 
 int cmdline_init()
 {
     thread_t procTaskHandle = NULL;
-    init_uart();
+
+    INIT_LIST_HEAD(&s_cmd_list);
+
+    for (uint8_t i = 0; i < UBOUND(g_cmd_list); ++i) {
+        reg_cmdline(g_cmd_list[i].cmd_string, g_cmd_list[i].cmd, g_cmd_list[i].description);
+    }
+
+    cmd_uart_init();
+
+    //#ifdef USED_UART1
+    //    g_cmd_uart.write = uart1.write;
+    //    g_cmd_uart.read = uart1.read;
+    //#endif
+#ifdef USED_UART4
+    g_cmd_uart.write = uart4.write;
+    g_cmd_uart.read = uart4.read;
+#endif
 
     if (THREAD_OK != create_thread(cmdline_process,
-                                   "cmdline_thread",
-                                   1024+1024,
-                                   NULL,
-                                   OS_PRIO_MEDIUM+1,
-                                   &procTaskHandle,
-                                   NULL)) {
+        "cmdline_thread",
+        1024 + 1024 + 256,
+        NULL,
+        OS_PRIO_MEDIUM + 1,
+        &procTaskHandle,
+        NULL)) {
         LogErrorPrefix("%s failed!\r\n", __FUNCTION__);
         return 0;
     }
-
+    LogDebugPrefix("cmdline_init finished!\r\n");
     return 0;
 }
+
+void reg_cmdline(char *cmd_string, cmdline_cb cmd, char *description)
+{
+    ST_CMDLINE_NODE *node = (ST_CMDLINE_NODE *)malloc(sizeof(ST_CMDLINE_NODE));
+    node->cmdline.cmd_string = cmd_string;
+    node->cmdline.cmd = cmd;
+    node->cmdline.description = description;
+    list_add_tail(&(node->list), &s_cmd_list);
+}
+
+#else
+int cmdline_init()
+{
+    return 0;
+}
+#endif /*USED_CMDLINE*/
